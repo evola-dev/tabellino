@@ -1,0 +1,14 @@
+{
+  "name": "Tabellino — calcetto, statistiche e pagelle",
+  "short_name": "Tabellino",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2F4F1",
+  "theme_color": "#F2F4F1",
+  "description": "Registra la partita di calcetto, calcola pagelle, premi e statistiche del gruppo.",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
