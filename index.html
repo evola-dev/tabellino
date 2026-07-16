@@ -312,19 +312,26 @@ function awards(m){
   return a.slice(0,6);
 }
 
-/* rating 35–100: memoria corta, così chi torna in forma risale subito */
-function applyRating(m){
-  pagella(m).forEach(r=>{
-    const p = db.players.find(x=>x.id===r.pid); if(!p) return;
-    p.rating = Math.round(((p.rating ?? 65) * 0.82 + (r.v*10) * 0.18) * 10)/10;
-  });
+/* rating dinamico: si ricalcola replay-ando lo storico in ordine di data.
+   Così correggere una partita conclusa aggiorna tutto senza doppi conteggi. */
+let RATINGS = {};
+function computeRatings(){
+  const r = {};
+  const done = db.matches.filter(m=>m.status==='done')
+    .sort((a,b)=> a.date.localeCompare(b.date) || String(a.created||0).localeCompare(String(b.created||0)));
+  done.forEach(m=> pagella(m).forEach(row=>{
+    if (r[row.pid]==null) r[row.pid]=65;
+    r[row.pid] = Math.round((r[row.pid]*0.82 + row.v*10*0.18)*10)/10;
+  }));
+  return r;
 }
+const rt = pid => (RATINGS[pid] ?? 65);
 
 /* ============================================================
    Sorteggio bilanciato (il vero risparmio di litigi del giovedì)
    ============================================================ */
 function draft(ids){
-  const ps = ids.map(id=>player(id)).map(p=>({id:p.id, r:p.rating ?? 65, gk:p.role==='POR'}));
+  const ps = ids.map(id=>player(id)).map(p=>({id:p.id, r:rt(p.id), gk:p.role==='POR'}));
   ps.sort((a,b)=>b.r-a.r);
   let A=[], B=[];
   // i due portieri vanno separati
@@ -522,7 +529,7 @@ function toast(msg){ const t=el('toast'); t.textContent=msg; t.classList.add('on
 function openSheet(html){ el('sheetBody').innerHTML = html; el('sheet').classList.add('on'); el('scrim').classList.add('on'); }
 function closeSheet(){ el('sheet').classList.remove('on'); el('scrim').classList.remove('on'); }
 el('scrim').onclick = closeSheet;
-const go = (v, id) => { S.view=v; if(id!==undefined) S.matchId=id; window.scrollTo(0,0); render(); };
+const go = (v, id) => { if(v!=='report') S.edit=false; S.view=v; if(id!==undefined) S.matchId=id; window.scrollTo(0,0); render(); };
 const cur = () => db.matches.find(m=>m.id===S.matchId);
 
 /* ============================================================
@@ -572,7 +579,6 @@ function cardMatch(m){
 }
 
 function vNew(){
-  const avail = db.players.filter(p=>p.avail !== false);
   const sel = S.newSel || [];
   return `
   <div class="card pad">
@@ -583,44 +589,104 @@ function vNew(){
   <div class="card pad">
     ${db.players.length ? db.players.map(p=>`
       <button class="chip ${sel.includes(p.id)?'on':''}" style="margin:0 6px 8px 0" onclick="togglePick('${p.id}')">
-        ${esc(p.name)} <span class="num" style="opacity:.6">${Math.round(p.rating ?? 65)}</span>
+        ${esc(p.name)} <span class="num" style="opacity:.6">${rt(p.id)}</span>
       </button>`).join('')
       : `<div class="muted small">Nessun giocatore in rosa. Vai su <b>Rosa</b> e aggiungili.</div>`}
   </div>
   <div style="height:12px"></div>
   <button class="btn" ${sel.length<4?'disabled':''} onclick="doDraft()">⚖️ Sorteggia squadre bilanciate</button>
   <div style="height:8px"></div>
-  <button class="btn ghost" ${sel.length<2?'disabled':''} onclick="doDraft(true)">Dividi a mano (metà e metà)</button>
+  <button class="btn ghost" ${sel.length<2?'disabled':''} onclick="goManual()">✋ Scegli le squadre a mano</button>
   <p class="small muted" style="margin-top:12px">Il sorteggio usa il rating di forma di ognuno e prova a pareggiare i due totali. I portieri finiscono sempre da parti opposte.</p>`;
 }
 window.togglePick = id => { S.newSel = S.newSel||[]; const i=S.newSel.indexOf(id); i<0?S.newSel.push(id):S.newSel.splice(i,1); render(); };
 window.newMatch = () => { S.newSel=[]; S.newDate=null; S.newPlace=''; go('new'); };
-window.doDraft = (manual)=>{
-  S.newDate = el('fDate').value; S.newPlace = el('fPlace').value;
-  const ids = S.newSel;
-  const d = manual
-    ? {A:{players:ids.filter((_,i)=>i%2===0), gk:null, val:0}, B:{players:ids.filter((_,i)=>i%2===1), gk:null, val:0}}
-    : draft(ids);
+
+function createMatch(aIds, bIds, msg){
   const m = {
     id:uid(), date:S.newDate, place:S.newPlace, status:'live', events:[], created:Date.now(),
     teams:{
-      A:{name:'Bianchi', color:'#0E1F1A', players:d.A.players, gk:d.A.gk},
-      B:{name:'Pettorine', color:'#FF4D2E', players:d.B.players, gk:d.B.gk}
+      A:{name:'Bianchi',   color:'#0E1F1A', players:aIds, gk:null},
+      B:{name:'Pettorine', color:'#FF4D2E', players:bIds, gk:null}
     }
   };
   db.matches.push(m); save();
   S.clock={run:false,base:0,start:0};
-  toast(manual?'Squadre create':`Squadre bilanciate (${d.A.val} vs ${d.B.val})`);
+  toast(msg);
   go('live', m.id);
+}
+
+window.doDraft = ()=>{
+  S.newDate = el('fDate').value; S.newPlace = el('fPlace').value;
+  RATINGS = computeRatings();
+  const d = draft(S.newSel);
+  createMatch(d.A.players, d.B.players, `Squadre bilanciate (${d.A.val} vs ${d.B.val})`);
 };
+
+/* ---- squadre a mano ---- */
+window.goManual = ()=>{
+  S.newDate = el('fDate').value; S.newPlace = el('fPlace').value;
+  S.assign = {};
+  // pre-assegnazione alternata come punto di partenza modificabile
+  S.newSel.forEach((id,i)=> S.assign[id] = i%2===0 ? 'A' : 'B');
+  go('manual');
+};
+window.setSide = (id, side)=>{ S.assign[id] = side; render(); };
+window.manualBalance = ()=>{
+  RATINGS = computeRatings();
+  const d = draft(S.newSel);
+  S.assign = {};
+  d.A.players.forEach(id=> S.assign[id]='A');
+  d.B.players.forEach(id=> S.assign[id]='B');
+  toast(`Bilanciate: ${d.A.val} vs ${d.B.val}`);
+  render();
+};
+window.doManual = ()=>{
+  const A = S.newSel.filter(id=>S.assign[id]==='A');
+  const B = S.newSel.filter(id=>S.assign[id]==='B');
+  if (A.length<1 || B.length<1) return toast('Serve almeno un giocatore per squadra');
+  createMatch(A, B, 'Squadre create a mano');
+};
+
+function vManual(){
+  const A = S.newSel.filter(id=>S.assign[id]==='A');
+  const B = S.newSel.filter(id=>S.assign[id]==='B');
+  const sum = ids => ids.reduce((s,id)=>s+rt(id),0);
+  const row = id => {
+    const p = player(id), side = S.assign[id];
+    return `<div class="prow" style="border-bottom:1px dashed var(--line)">
+      ${avatar(p)}
+      <div class="who"><b>${esc(p.name)}</b><div class="line">${p.role||'CEN'} · forma ${rt(id)}</div></div>
+      <div class="stepper" style="gap:6px">
+        <button class="chip ${side==='A'?'on':''}" style="padding:6px 11px" onclick="setSide('${id}','A')">Bianchi</button>
+        <button class="chip ${side==='B'?'on':''}" style="padding:6px 11px" onclick="setSide('${id}','B')">Pettorine</button>
+      </div>
+    </div>`;
+  };
+  return `
+  <div class="card pad">
+    <div class="spread">
+      <div><div class="tiny">Bianchi</div><div class="display" style="font-size:20px">${A.length} <span class="muted" style="font-size:13px">· ${sum(A)}</span></div></div>
+      <div class="muted">vs</div>
+      <div style="text-align:right"><div class="tiny" style="color:var(--bib)">Pettorine</div><div class="display" style="font-size:20px">${B.length} <span class="muted" style="font-size:13px">· ${sum(B)}</span></div></div>
+    </div>
+    <div class="bar" style="margin-top:10px"><i style="width:${sum(A)+sum(B) ? Math.round(sum(A)/(sum(A)+sum(B))*100) : 50}%;background:var(--ink)"></i></div>
+    <div class="small muted" style="margin-top:6px">Divario forma: ${Math.abs(sum(A)-sum(B))}</div>
+  </div>
+  <div class="sec"><h2>Assegna le squadre</h2></div>
+  <div class="card" style="padding:4px 16px">${S.newSel.map(row).join('')}</div>
+  <div style="height:12px"></div>
+  <button class="btn ghost" onclick="manualBalance()">⚖️ Suggerisci una divisione equa</button>
+  <div style="height:8px"></div>
+  <button class="btn bib" ${(A.length<1||B.length<1)?'disabled':''} onclick="doManual()">Crea partita</button>
+  <p class="small muted" style="margin-top:12px">Il portiere di ogni squadra lo imposti in partita, toccando il giocatore.</p>`;
+}
 
 function mins(){ const c=S.clock; const ms = c.base + (c.run ? Date.now()-c.start : 0); return Math.floor(ms/60000); }
 function clockTxt(){ const c=S.clock; const ms=c.base+(c.run?Date.now()-c.start:0); const s=Math.floor(ms/1000);
   return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
 
-function vLive(){
-  const m = cur(); if(!m) return vHome();
-  const s = score(m);
+function pitchHTML(m){
   const side = k => {
     const t = m.teams[k];
     return `<div class="side">
@@ -633,13 +699,20 @@ function vLive(){
       }).join('') || '<div class="pad muted small">Nessuno</div>'}
     </div>`;
   };
-  const feed = [...m.events].reverse().map(e=>{
+  return `<div class="pitch">${side('A')}${side('B')}</div>`;
+}
+function feedHTML(m){
+  return [...m.events].reverse().map(e=>{
     const d=evOf(e.k), p=player(e.p);
     return `<div class="ev"><span class="min num">${e.min}'</span><span>${d.i}</span>
       <span><b>${esc(p.name)}</b> <span class="muted small">${d.l}</span></span>
       <button class="x" onclick="undo('${e.id}')">✕</button></div>`;
   }).join('') || '<div class="muted small" style="padding:10px 0">Nessun evento. Tocca un giocatore per registrare la prima giocata.</div>';
+}
 
+function vLive(){
+  const m = cur(); if(!m) return vHome();
+  const s = score(m);
   return `
   <div class="board">
     <div class="teams">
@@ -652,9 +725,9 @@ function vLive(){
       <button onclick="toggleClock()">${S.clock.run?'Pausa':'Avvia'}</button>
     </div>
   </div>
-  <div class="pitch">${side('A')}${side('B')}</div>
+  ${pitchHTML(m)}
   <div class="sec"><h2>Tabellino</h2><span class="tiny">${m.events.length} eventi</span></div>
-  <div class="card pad">${feed}</div>
+  <div class="card pad">${feedHTML(m)}</div>
   <div style="height:14px"></div>
   <button class="btn bib" onclick="endMatch()">Chiudi la partita e apri le pagelle</button>`;
 }
@@ -682,10 +755,11 @@ window.pickPlayer = pid => {
 };
 window.setGk = pid => { const m=cur(); const t=m.teams[teamOf(m,pid)]; t.gk = t.gk===pid?null:pid; save(); closeSheet(); render(); };
 window.addEv = (pid,k)=>{ const m=cur();
-  m.events.push({id:uid(), p:pid, k, min:mins(), ts:Date.now()}); save(); closeSheet(); render();
+  const min = m.status==='done' ? (m.minutes||0) : mins();
+  m.events.push({id:uid(), p:pid, k, min, ts:Date.now()}); save(); closeSheet(); render();
   toast(`${evOf(k).i} ${evOf(k).l} — ${player(pid).name}`); };
 window.undo = id => { const m=cur(); m.events = m.events.filter(e=>e.id!==id); save(); render(); };
-window.endMatch = ()=>{ const m=cur(); m.status='done'; m.minutes=mins(); applyRating(m); save(); go('report', m.id); };
+window.endMatch = ()=>{ const m=cur(); m.status='done'; m.minutes=mins(); save(); go('report', m.id); };
 
 function vReport(){
   const m = cur(); if(!m) return vHome();
@@ -721,6 +795,15 @@ function vReport(){
     }).join('')}
   </div>
 
+  <div class="sec"><h2>Correzioni</h2><span class="tiny">modifica il tabellino a partita conclusa</span></div>
+  <button class="btn ghost" onclick="toggleEdit()">${S.edit?'✓ Fatto, chiudi le correzioni':'✏️ Correggi tabellino e voti'}</button>
+  ${S.edit ? `
+    <p class="small muted" style="margin:10px 0">Tocca un giocatore per aggiungere una giocata, o ✕ per togliere un evento sbagliato. Voti, premi e classifiche si aggiornano subito.</p>
+    ${pitchHTML(m)}
+    <div class="sec"><h2>Tabellino</h2><span class="tiny">${m.events.length} eventi</span></div>
+    <div class="card pad">${feedHTML(m)}</div>
+  ` : ''}
+
   <div class="sec"><h2>Voto dei compagni</h2><span class="pro-badge">Pro</span></div>
   ${peerCard(m)}
 
@@ -732,6 +815,7 @@ function vReport(){
   <div style="height:8px"></div>
   <button class="btn ghost" onclick="go('home')">Torna alle partite</button>`;
 }
+window.toggleEdit = ()=>{ S.edit = !S.edit; render(); };
 
 /* Telecronaca: il tabellino diventa un pezzo di giornale, con sfottò */
 window.telecronaca = async ()=>{
@@ -775,7 +859,7 @@ window.shareMatch = ()=>{
 };
 
 function vRosa(){
-  const ps = [...db.players].sort((a,b)=> (b.rating??65)-(a.rating??65));
+  const ps = [...db.players].sort((a,b)=> rt(b.id)-rt(a.id));
   return `
   <div class="card pad">
     <label class="lab">Nuovo giocatore</label>
@@ -793,11 +877,11 @@ function vRosa(){
       <div class="row">
         ${avatar(p)}
         <div style="flex:1;min-width:0">
-          <div class="spread"><b>${esc(p.name)}</b><span class="num" style="font-weight:700">${Math.round(p.rating??65)}</span></div>
+          <div class="spread"><b>${esc(p.name)}</b><span class="num" style="font-weight:700">${rt(p.id)}</span></div>
           <div class="small muted">${p.role} · ${c.n} partite · ${c.gol}G ${c.assist}A · media ${c.n?c.media.toFixed(1):'–'}</div>
-          <div class="bar"><i style="width:${Math.max(4,Math.min(100,(p.rating??65)))}%"></i></div>
+          <div class="bar"><i style="width:${Math.max(4,Math.min(100,rt(p.id)))}%"></i></div>
         </div>
-        <button class="x muted" style="font-size:18px" onclick="delPlayer('${p.id}')">✕</button>
+        <button class="chip" style="padding:7px 10px" onclick="editPlayer('${p.id}')">✎</button>
       </div>
     </div>`;
   }).join('') : `<div class="empty"><div class="display">Rosa vuota</div>Aggiungi i primi nomi qui sopra.</div>`}`;
@@ -808,7 +892,31 @@ window.addPlayer = ()=>{
   const n = el('pName').value.trim(); if(!n) return toast('Serve un nome');
   db.players.push({id:uid(), name:n, role:newRole, rating:65, avail:true}); save(); render(); toast(`${n} in rosa`);
 };
-window.delPlayer = id => { if(confirm('Togliere dalla rosa? Le partite giocate restano.')){ db.players=db.players.filter(p=>p.id!==id); save(); render(); } };
+
+let editRole='CEN';
+window.editPlayer = id => {
+  const p = player(id); editRole = p.role || 'CEN';
+  openSheet(`
+    <div class="display" style="font-size:19px;margin:2px 0 12px">Modifica giocatore</div>
+    <label class="lab">Nome</label>
+    <input class="field" id="epName" value="${esc(p.name)}">
+    <label class="lab" style="display:block;margin-top:12px">Ruolo</label>
+    <div class="row" style="margin-top:6px;flex-wrap:wrap">
+      ${ROLES.map(r=>`<button class="chip ${r===editRole?'on':''}" data-erole="${r}" onclick="pickEditRole(this)">${r}</button>`).join('')}
+    </div>
+    <div style="height:16px"></div>
+    <button class="btn" onclick="saveEditPlayer('${id}')">Salva</button>
+    <div style="height:8px"></div>
+    <button class="btn ghost" style="color:var(--bad);border-color:var(--bad)" onclick="delPlayer('${id}')">Togli dalla rosa</button>
+  `);
+};
+window.pickEditRole = b => { editRole=b.dataset.erole; b.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on', c===b)); };
+window.saveEditPlayer = id => {
+  const p = player(id), n = el('epName').value.trim();
+  if(!n) return toast('Serve un nome');
+  p.name = n; p.role = editRole; save(); closeSheet(); render(); toast('Giocatore aggiornato');
+};
+window.delPlayer = id => { if(confirm('Togliere dalla rosa? Le partite giocate restano.')){ db.players=db.players.filter(p=>p.id!==id); save(); closeSheet(); render(); } };
 
 function vStats(){
   const ps = db.players.map(p=>({p, c:career(p.id)})).filter(x=>x.c.n>0);
@@ -866,15 +974,18 @@ function vAlbo(){
    Router
    ============================================================ */
 const TITLES = {home:['Il campetto','Tabellino'], new:['Nuova partita','Chi scende in campo'],
+  manual:['Nuova partita','Squadre a mano'],
   live:['Diretta','Tabellino live'], report:['Fine partita','Le pagelle'],
   rosa:['Squadra','La rosa'], stats:['Numeri','Statistiche'], albo:['Trofei','Albo d\'oro']};
 function render(){
+  RATINGS = computeRatings();
   const [eb, ti] = TITLES[S.view] || TITLES.home;
   el('eyebrow').textContent = eb; el('title').textContent = ti;
-  const back = ['new','live','report'].includes(S.view);
+  const back = ['new','manual','live','report'].includes(S.view);
   const ta = el('topAction');
-  ta.hidden = !back; ta.textContent = '← Indietro'; ta.onclick = ()=> go('home');
-  const views = {home:vHome, new:vNew, live:vLive, report:vReport, rosa:vRosa, stats:vStats, albo:vAlbo};
+  ta.hidden = !back; ta.textContent = '← Indietro';
+  ta.onclick = ()=> go(S.view==='manual' ? 'new' : 'home');
+  const views = {home:vHome, new:vNew, manual:vManual, live:vLive, report:vReport, rosa:vRosa, stats:vStats, albo:vAlbo};
   el('view').innerHTML = (views[S.view]||vHome)();
   nav();
 }
